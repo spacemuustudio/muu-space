@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useAuth } from "./components/AuthProvider";
+import ChatModalTalk from "./components/ChatModalTalk";
 
 export default function HomePage() {
   const { user, loading } = useAuth();
@@ -14,9 +15,9 @@ export default function HomePage() {
           <span>登入中…</span>
         ) : (
           <>
-            <span>UID：{user?.uid}</span>
+            <span>UID：{user?.uid ?? "（尚未登入）"}</span>
             <span className="ml-2">
-              ({user?.isAnonymous ? "匿名登入" : "其他登入方式"})
+              ({user?.isAnonymous ? "匿名登入" : "其他登入方式 / 未登入"})
             </span>
           </>
         )}
@@ -35,15 +36,10 @@ export default function HomePage() {
           </p>
         </section>
 
+        {/* ✅ 這裡改成：送出後跳出中間聊天室 Modal */}
         <section className="input-section">
           <div className="input-wrapper">
-            <textarea
-              className="poetic-input"
-              placeholder="今天發生了什麼事？寫給自己聽聽看。"
-            />
-            <div className="input-actions">
-              <button className="btn btn-primary btn-submit">送出</button>
-            </div>
+            <ChatModalTalk />
           </div>
         </section>
 
@@ -56,11 +52,12 @@ export default function HomePage() {
                 收集很多人的真實片段，像一面會呼吸的牆。
               </p>
               <div className="card-actions">
-                <Link href="/stories">
-                  <button className="btn btn-primary">看看大家的故事</button>
+                {/* ✅ 修：Link 不要包 button（容易出現你說的那種錯誤/警告） */}
+                <Link href="/stories" className="btn btn-primary">
+                  看看大家的故事
                 </Link>
-                <Link href="/stories">
-                  <button className="btn btn-secondary">分享一個故事</button>
+                <Link href="/stories" className="btn btn-secondary">
+                  分享一個故事
                 </Link>
               </div>
             </div>
@@ -74,11 +71,11 @@ export default function HomePage() {
                 如果想整理一下現在的你，可以從這裡慢慢開始。
               </p>
               <div className="card-actions">
-                <Link href="/me">
-                  <button className="btn btn-primary">走進我的頁面</button>
+                <Link href="/me" className="btn btn-primary">
+                  走進我的頁面
                 </Link>
-                <Link href="/me">
-                  <button className="btn btn-secondary">寫一段新的</button>
+                <Link href="/me" className="btn btn-secondary">
+                  寫一段新的
                 </Link>
               </div>
             </div>
