@@ -68,7 +68,7 @@ async function callGroq(message: string): Promise<GroqResult> {
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: "llama-3.1-8b-instant",
         temperature: 0.6,
         max_tokens: 500,
         messages: [
