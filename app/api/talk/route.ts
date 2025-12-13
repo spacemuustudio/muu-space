@@ -2,6 +2,8 @@
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type ReqBody = {
   message?: string;
@@ -39,51 +41,77 @@ const SYSTEM_PROMPT = `
 請退回來，改成只是陪在旁邊說話。
 `.trim();
 
+type GroqOk = { ok: true; status: 200; data: { reply: string } };
+type GroqFail = { ok: false; status: number; data: { error: string; detail?: any } };
+type GroqResult = GroqOk | GroqFail;
 
-async function callGroq(message: string) {
+async function callGroq(message: string): Promise<GroqResult> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    return { ok: false as const, status: 500, data: { error: "伺服器未設定 GROQ_API_KEY" } };
-  }
-
-  const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
-      temperature: 0.6,
-      max_tokens: 500, // 先拉高，確保不會太短
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: message },
-      ],
-    }),
-  });
-
-  if (!resp.ok) {
-    const raw = await resp.text();
     return {
-      ok: false as const,
+      ok: false,
       status: 500,
-      data: { error: "Groq API 呼叫失敗", detail: raw },
+      data: { error: "伺服器未設定 GROQ_API_KEY" },
     };
   }
 
-  const data = await resp.json();
-  const reply: string = data?.choices?.[0]?.message?.content?.trim?.() ?? "";
+  // ✅ timeout，避免正式站卡很久
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
 
-  if (!reply) {
+  try {
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        temperature: 0.6,
+        max_tokens: 500,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: message },
+        ],
+      }),
+    });
+
+    if (!resp.ok) {
+      const raw = await resp.text().catch(() => "");
+      return {
+        ok: false,
+        status: resp.status || 500,
+        data: { error: "Groq API 呼叫失敗", detail: raw },
+      };
+    }
+
+    const data: any = await resp.json().catch(() => null);
+    const reply: string = data?.choices?.[0]?.message?.content?.trim?.() ?? "";
+
+    if (!reply) {
+      return {
+        ok: false,
+        status: 500,
+        data: { error: "模型沒有回覆內容", detail: data },
+      };
+    }
+
+    return { ok: true, status: 200, data: { reply } };
+  } catch (err: any) {
+    const isAbort = err?.name === "AbortError";
     return {
-      ok: false as const,
+      ok: false,
       status: 500,
-      data: { error: "模型沒有回覆內容", detail: data },
+      data: {
+        error: isAbort ? "Groq 請求逾時" : "Groq 呼叫發生例外",
+        detail: String(err),
+      },
     };
+  } finally {
+    clearTimeout(timer);
   }
-
-  return { ok: true as const, status: 200, data: { reply } };
 }
 
 export async function POST(req: Request) {
@@ -105,17 +133,23 @@ export async function POST(req: Request) {
       return NextResponse.json(result.data, { status: 200 });
     }
 
-    // ✅ 失敗：先給前端一個「一定會顯示」的 fallback（避免你整個聊天框空掉）
-    const fallback =
-      "我有收到你剛剛那段話。\n\n現在先不用把它說得很完整也沒關係，你能把它放出來，本身就不容易。\n\n如果你願意，可以再多留一點點：此刻最卡的是哪一小塊？";
+    // ✅ 失敗：不要再回 200（不然前端永遠以為成功、就會一直顯示固定 fallback）
+    // 直接把真正錯誤印到 Vercel Logs，讓你破案
+    console.error("Groq failed:", result.data);
 
     return NextResponse.json(
-      { reply: fallback, error: result.data.error, detail: result.data.detail },
-      { status: 200 }
+      {
+        error: result.data.error,
+        detail: result.data.detail ?? null,
+      },
+      { status: result.status || 500 }
     );
   } catch (err) {
-    const fallback =
-      "我在，但剛剛系統有點卡住。\n\n你不需要重打全部；你可以用一句話接著說，我會在這裡。\n\n如果你願意，就從「現在最難受的地方是…」開始也可以。";
-    return NextResponse.json({ reply: fallback, error: "伺服器錯誤", detail: String(err) }, { status: 200 });
+    console.error("talk route crashed:", err);
+
+    return NextResponse.json(
+      { error: "伺服器錯誤", detail: String(err) },
+      { status: 500 }
+    );
   }
 }
