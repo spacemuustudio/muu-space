@@ -4,26 +4,36 @@
    全域色彩設定
 ========================= */
 :root {
-  --background: #f7f2ec;
-  --foreground: #3a3a3a;
+  /* 背景 / 文字（莫蘭迪灰米） */
+  --background: #f2efe9;
+  --foreground: #2e2a27;
 
-  --bg-main: #faf7f3;
-  --bg-card: #ffffff;
+  --bg-main: #f6f3ee;
+  --bg-card: #fbfaf8;
+
   --text-main: #2f2a26;
-  --text-subtle: #6f655d;
+  --text-subtle: #7a716a;
 
-  --accent: #f5b7a6;
-  --accent-soft: #fde4d8;
-  --border-soft: #e7ddd4;
+  /* 主色：莫蘭迪陶土粉 + 柔和底 */
+  --accent: #c88f7a;
+  --accent-soft: #efe0d8;
 
-  --btn-primary: #e6b8a8;
-  --btn-primary-text: #6a3a2f;
-  --btn-secondary: #f1ece8;
-  --btn-secondary-text: #6a4e3f;
+  /* 深色搭配（莫蘭迪墨綠 / 深灰藍都行，這裡用墨綠） */
+  --accent-deep: #2f3b36;
+
+  --border-soft: #ddd4cb;
+
+  /* 按鈕 */
+  --btn-primary: var(--accent-deep);
+  --btn-primary-text: #f7f4ef;
+
+  --btn-secondary: #e9e3dc;
+  --btn-secondary-text: #3c3430;
 
   --radius-lg: 18px;
   --shadow-soft: 0 14px 40px rgba(0, 0, 0, 0.06);
 }
+
 
 /* =========================
    全域排版
@@ -187,12 +197,14 @@ body {
 
 .card {
   background: var(--bg-card);
-  border-radius: 24px; /* 接近正方形但保留圓角 */
+  border-radius: 24px;
+  /* 接近正方形但保留圓角 */
   border: 1px solid var(--border-soft);
   padding: 24px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.05);
 
-  min-height: 240px; /* 讓卡片比較像方形 */
+  min-height: 240px;
+  /* 讓卡片比較像方形 */
   display: flex;
 }
 

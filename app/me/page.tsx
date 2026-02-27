@@ -17,7 +17,7 @@ import {
   updateDoc,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { useAuth } from "../components/AuthProvider";
+import { useAuth } from "../../components/AuthProvider";
 
 type FirestoreTimestamp = {
   seconds: number;

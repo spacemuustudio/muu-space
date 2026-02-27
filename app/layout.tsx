@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { AuthProvider } from "./components/AuthProvider";
+import AuthProvider from "@/components/AuthProvider";
+import Navbar from "@/components/Navbar";
 
 export const metadata: Metadata = {
   title: "muu space 心理探索",
@@ -27,9 +28,12 @@ export default function RootLayout({
         />
       </head>
 
-      <body>
-        {/* 🔥 在這裡包起來，讓整個 App 都能用匿名登入 */}
-        <AuthProvider>{children}</AuthProvider>
+      <body className="pt-14">
+        {/* ✅ 全站提供 Auth 狀態：未登入 user 會是 null；需要帳號的頁面請擋 !user */}
+        <AuthProvider>
+          <Navbar />
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );
