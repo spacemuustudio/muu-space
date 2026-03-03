@@ -13,88 +13,163 @@ import { auth } from "@/lib/firebase";
 import {
   onAuthStateChanged,
   signInAnonymously,
+  getRedirectResult,
+  signInWithCredential,
+  GoogleAuthProvider,
   type User,
 } from "firebase/auth";
 
 type AuthContextValue = {
   user: User | null;
   loading: boolean;
-
-  /** 是否匿名登入（訪客） */
   isAnonymous: boolean;
-
-  /** 是否已登入（有正式帳號；匿名不算） */
-  isLoggedIn: boolean;
+  isLoggedIn: boolean; // 只有非匿名才算正式登入
 };
 
-/**
- * ⚠️ 允許 null
- */
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-/** =========================
- *  Hook
- * ========================= */
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error("useAuth 必須在 <AuthProvider> 裡使用");
-  }
+  if (!ctx) throw new Error("useAuth 必須在 <AuthProvider> 裡使用");
   return ctx;
 }
 
-/** =========================
- *  Provider
- * ========================= */
+function snapshotUser(u: User | null) {
+  if (!u) return null;
+  return {
+    uid: u.uid,
+    isAnonymous: u.isAnonymous,
+    email: u.email ?? null,
+    displayName: u.displayName ?? null,
+    providerIds: (u.providerData || []).map((p) => p.providerId),
+  };
+}
+
 export default function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // ✅ 防止 onAuthStateChanged=null 時一直重複觸發匿名登入
   const didTryAnonymousRef = useRef(false);
+  const didInitRef = useRef(false);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (firebaseUser) {
-        setUser(firebaseUser);
-        setLoading(false);
-        return;
-      }
+    let alive = true;
+    if (didInitRef.current) return;
+    didInitRef.current = true;
 
-      // 沒登入：自動匿名登入（讓未登入訪客也能讀 Firestore）
-      if (!didTryAnonymousRef.current) {
-        didTryAnonymousRef.current = true;
-        try {
-          await signInAnonymously(auth);
-          // 成功後 onAuthStateChanged 會再觸發一次，firebaseUser 就會有值
-          return;
-        } catch (e) {
-          console.error("signInAnonymously failed:", e);
+    const init = async () => {
+      // ✅ 1) 處理 redirect 收尾
+      try {
+        const res = await getRedirectResult(auth);
+        console.log(
+          "[Auth] redirect result:",
+          JSON.stringify(snapshotUser(res?.user ?? null))
+        );
+      } catch (e: any) {
+        const code = e?.code ?? null;
+        const message = e?.message ?? String(e);
+        console.warn(
+          "[Auth] getRedirectResult failed:",
+          JSON.stringify({ code, message })
+        );
+
+        if (
+          code === "auth/credential-already-in-use" ||
+          code === "auth/account-exists-with-different-credential"
+        ) {
+          try {
+            const cred = GoogleAuthProvider.credentialFromError(e);
+            if (cred) {
+              const res2 = await signInWithCredential(auth, cred);
+              console.log(
+                "[Auth] fallback signInWithCredential success:",
+                JSON.stringify(snapshotUser(res2.user))
+              );
+            } else {
+              console.warn("[Auth] credentialFromError returned null");
+            }
+          } catch (e2: any) {
+            console.error("[Auth] fallback signInWithCredential failed:", {
+              code: e2?.code ?? null,
+              message: e2?.message ?? String(e2),
+            });
+          }
         }
       }
 
-      // 若匿名登入失敗（或已嘗試過一次仍無 user），就保持 null
-      setUser(null);
-      setLoading(false);
-    });
+      // ✅ 2) 監聽登入狀態
+      const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (!alive) return;
 
-    return () => unsub();
+        console.log(
+          "[Auth] state changed:",
+          JSON.stringify(snapshotUser(firebaseUser))
+        );
+
+        if (firebaseUser) {
+          setUser(firebaseUser);
+          setLoading(false);
+          return;
+        }
+
+        // ✅ 3) 沒登入 → 自動匿名
+        if (!didTryAnonymousRef.current) {
+          didTryAnonymousRef.current = true;
+
+          await new Promise((r) => setTimeout(r, 300));
+
+          const u2 = auth.currentUser;
+          if (u2) {
+            setUser(u2);
+            setLoading(false);
+            return;
+          }
+
+          try {
+            await signInAnonymously(auth);
+            return;
+          } catch (e3: any) {
+            console.error("[Auth] signInAnonymously failed:", {
+              code: e3?.code ?? null,
+              message: e3?.message ?? String(e3),
+            });
+          }
+        }
+
+        setUser(null);
+        setLoading(false);
+      });
+
+      return unsub;
+    };
+
+    let unsub: (() => void) | null = null;
+
+    (async () => {
+      unsub = await init();
+    })();
+
+    return () => {
+      alive = false;
+      if (unsub) unsub();
+    };
   }, []);
 
   const value = useMemo<AuthContextValue>(() => {
     const isAnon = !!user?.isAnonymous;
+
     return {
       user,
       loading,
       isAnonymous: isAnon,
-      // ✅ 「正式登入」才算 isLoggedIn，匿名不算
       isLoggedIn: !!user && !isAnon,
     };
   }, [user, loading]);
 
+  // ✅ 不使用 h-screen，避免干擾 layout 結構
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center text-sm text-neutral-500">
+      <div className="flex min-h-[50vh] items-center justify-center text-sm text-neutral-500">
         muu space 正在為你準備小宇宙…
       </div>
     );

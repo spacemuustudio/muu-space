@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { onAuthStateChanged, signOut, User } from "firebase/auth";
+import { signOut } from "firebase/auth";
 import {
   collection,
   doc,
@@ -16,6 +16,7 @@ import {
 } from "firebase/firestore";
 
 import { auth, db } from "@/lib/firebase";
+import { useAuth } from "@/components/AuthProvider";
 
 type AgeRange = "under18" | "18-24" | "25-34" | "35-44" | "45-54" | "55plus";
 type Mbti =
@@ -294,10 +295,9 @@ function CoolReaderModal(props: {
 
 export default function AccountPage() {
   const router = useRouter();
-  const nextUrl = "/account";
 
-  const [authLoading, setAuthLoading] = useState(true);
-  const [user, setUser] = useState<User | null>(null);
+  // ✅ 只信 AuthProvider 的狀態（避免匿名被當正式登入）
+  const { user, loading: authLoading, isLoggedIn } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<UserProfileDoc | null>(null);
@@ -315,31 +315,18 @@ export default function AccountPage() {
     setLoggingOut(true);
     try {
       await signOut(auth);
-      router.replace("/"); // 你也可以改 "/login"
+      router.replace("/");
     } catch (e) {
       console.error("logout error:", e);
       setErr("登出失敗（可能是網路問題）");
+    } finally {
       setLoggingOut(false);
     }
   };
 
-  // Auth gate：未登入 → login
+  // ✅ 只有「正式登入」才載入 profile + my posts
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setAuthLoading(false);
-
-      if (!u) {
-        router.replace(`/login?next=${encodeURIComponent(nextUrl)}`);
-        return;
-      }
-      setUser(u);
-    });
-    return () => unsub();
-  }, [router]);
-
-  // load profile + my posts
-  useEffect(() => {
-    if (!user) return;
+    if (!isLoggedIn || !user) return;
 
     let alive = true;
 
@@ -348,7 +335,7 @@ export default function AccountPage() {
       setErr(null);
 
       try {
-        // 1) profile
+        // 1) profile（暫時先用 users；之後你要做 publicProfiles 再改）
         const ref = doc(db, "users", user.uid);
         const snap = await getDoc(ref);
 
@@ -431,7 +418,7 @@ export default function AccountPage() {
     return () => {
       alive = false;
     };
-  }, [user]);
+  }, [isLoggedIn, user]);
 
   const completion = useMemo(() => {
     const fields = [
@@ -444,9 +431,45 @@ export default function AccountPage() {
     return { count: fields.filter(Boolean).length, total: fields.length };
   }, [profile]);
 
-  if (authLoading || !user) {
+  // ✅ authLoading：顯示載入
+  if (authLoading) {
     return (
-      <main className="mx-auto max-w-5xl px-4 py-10">
+      <main className="py-10">
+        <h1 className="text-2xl font-semibold">個人</h1>
+        <p className="mt-3 text-sm" style={{ color: "var(--text-subtle)" }}>
+          載入中…
+        </p>
+      </main>
+    );
+  }
+
+  // ✅ 未正式登入（包含匿名）→ 顯示請登入（不查 Firestore、不顯示登出/草稿）
+  if (!isLoggedIn) {
+    return (
+      <main className="py-10">
+        <h1 className="text-2xl font-semibold" style={{ color: "var(--text-main)" }}>
+          個人
+        </h1>
+        <p className="mt-3 text-sm" style={{ color: "var(--text-subtle)" }}>
+          你目前是訪客狀態（未登入）。登入後才能查看個人頁、草稿與作品。
+        </p>
+
+        <div className="mt-6 flex gap-2">
+          <Link
+            href="/login?next=%2Faccount"
+            className="rounded-md bg-black px-4 py-2 text-sm text-white hover:opacity-90"
+          >
+            註冊 / 登入
+          </Link>
+        </div>
+      </main>
+    );
+  }
+
+  // ✅ 正式登入但 user 意外為 null（理論上不會，但保護）
+  if (!user) {
+    return (
+      <main className="py-10">
         <h1 className="text-2xl font-semibold">個人</h1>
         <p className="mt-3 text-sm" style={{ color: "var(--text-subtle)" }}>
           載入中…
@@ -456,7 +479,7 @@ export default function AccountPage() {
   }
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-10">
+    <main className="py-10">
       <div className="flex flex-col gap-6 md:flex-row md:items-start md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold" style={{ color: "var(--text-main)" }}>

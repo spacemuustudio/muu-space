@@ -28,11 +28,16 @@ export default function RootLayout({
         />
       </head>
 
-      <body className="pt-14">
-        {/* ✅ 全站提供 Auth 狀態：未登入 user 會是 null；需要帳號的頁面請擋 !user */}
+      <body>
         <AuthProvider>
           <Navbar />
-          {children}
+
+          {/* ✅ 全站統一內容結構 */}
+          <main className="pt-14">
+            <div className="max-w-5xl mx-auto px-4">
+              {children}
+            </div>
+          </main>
         </AuthProvider>
       </body>
     </html>

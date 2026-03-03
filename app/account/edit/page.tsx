@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { onAuthStateChanged, User } from "firebase/auth";
+import type { User } from "firebase/auth";
 import { doc, getDoc, runTransaction, serverTimestamp } from "firebase/firestore";
 
-import { auth, db } from "@/lib/firebase";
+import { db } from "@/lib/firebase";
 import { uploadAvatar } from "@/lib/firebase/avatar-service";
+import { useAuth } from "@/components/AuthProvider";
 
 type AgeRange = "under18" | "18-24" | "25-34" | "35-44" | "45-54" | "55plus";
 type Mbti =
@@ -52,8 +53,11 @@ export default function AccountEditPage() {
   const router = useRouter();
   const nextUrl = "/account/edit";
 
-  const [authLoading, setAuthLoading] = useState(true);
-  const [user, setUser] = useState<User | null>(null);
+  // ✅ 全站一致：只信 AuthProvider（匿名不算登入）
+  const { user: authUser, loading: authLoading, isLoggedIn } = useAuth();
+
+  // 這裡沿用原本型別，避免你其他地方依賴 User 型別的行為
+  const user = (authUser as User | null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -72,22 +76,17 @@ export default function AccountEditPage() {
     avatarUrl: null,
   });
 
-  // Auth gate
+  // ✅ Auth gate：未正式登入（含匿名）→ 導去 login
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setAuthLoading(false);
-      if (!u) {
-        router.replace(`/login?next=${encodeURIComponent(nextUrl)}`);
-        return;
-      }
-      setUser(u);
-    });
-    return () => unsub();
-  }, [router]);
+    if (authLoading) return;
+    if (!isLoggedIn || !user) {
+      router.replace(`/login?next=${encodeURIComponent(nextUrl)}`);
+    }
+  }, [authLoading, isLoggedIn, user, router]);
 
   // Load profile (from users/{uid})
   useEffect(() => {
-    if (!user) return;
+    if (!isLoggedIn || !user) return;
 
     let alive = true;
     (async () => {
@@ -137,7 +136,7 @@ export default function AccountEditPage() {
     return () => {
       alive = false;
     };
-  }, [user]);
+  }, [isLoggedIn, user]);
 
   const canSave = useMemo(() => {
     if (originalUsername) return true;
@@ -149,7 +148,7 @@ export default function AccountEditPage() {
 
   const handleAvatarPick = async (file: File | null) => {
     if (!file) return;
-    if (!user) return;
+    if (!isLoggedIn || !user) return;
 
     setUploading(true);
     setErr(null);
@@ -165,7 +164,7 @@ export default function AccountEditPage() {
   };
 
   const handleSave = async () => {
-    if (!user || saving) return;
+    if (!isLoggedIn || !user || saving) return;
     if (!canSave) {
       setErr("Username 格式不正確（只能 a-z、0-9、_，長度 3–20）");
       return;
@@ -250,16 +249,16 @@ export default function AccountEditPage() {
     }
   };
 
-  if (authLoading || !user) {
+  if (authLoading || !isLoggedIn || !user) {
     return (
-      <main className="mx-auto max-w-2xl px-4 py-10">
+      <main className="py-10">
         <div className="text-sm" style={{ color: "var(--text-subtle)" }}>載入中…</div>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto max-w-2xl px-4 py-10">
+    <main className="py-10">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold" style={{ color: "var(--text-main)" }}>編輯個人檔案</h1>

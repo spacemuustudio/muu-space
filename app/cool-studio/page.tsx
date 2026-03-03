@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { useAuth } from "@/components/AuthProvider";
@@ -21,11 +21,15 @@ export default function CoolStudioPage() {
   const searchParams = useSearchParams();
   const qs = searchParams.toString();
 
+  // ✅ 固定 id（避免 searchParams 物件特性造成 effect 不穩）
+  const id = useMemo(() => searchParams.get("id"), [searchParams]);
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const { user, loading: authLoading } = useAuth();
+  // ✅ 只信 AuthProvider：正式登入才算可用（匿名不算）
+  const { user, loading: authLoading, isLoggedIn } = useAuth();
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [postId, setPostId] = useState<string | null>(null);
   const [status, setStatus] = useState<PostStatus>("draft");
   const [title, setTitle] = useState("");
@@ -36,18 +40,44 @@ export default function CoolStudioPage() {
 
   const [authorName, setAuthorName] = useState<string>("匿名");
 
-  // ✅ 避免 authorName 更新導致 boot 重跑、重複建草稿
+  // ✅ 防：authorName 改變不觸發其他流程
   const authorNameRef = useRef<string>("匿名");
   useEffect(() => {
     authorNameRef.current = authorName || "匿名";
   }, [authorName]);
 
+  // ✅ 防：新增草稿連點
+  const [creatingDraft, setCreatingDraft] = useState(false);
+
+  // ✅ 跑流程版本號（避免切頁時舊 async 回來覆蓋）
   const runIdRef = useRef(0);
 
-  // ✅ 讀取 username 來當作者顯示（優先 users.username，fallback displayName）
+  // ====== Morandi Tokens ======
+  const BG = "bg-[#F4F1EC]";
+  const BG_SOFT = "bg-[#E9E4DC]";
+  const CARD = "bg-[#F8F6F2]";
+  const BORDER = "border-[#D8D2C8]";
+  const TEXT_MAIN = "text-[#2F2F2F]";
+  const TEXT_SUB = "text-[#6B6B6B]";
+  const TEXT_MUTE = "text-[#8A8A8A]";
+  const ACCENT = "bg-[#7A8C99]";
+  const ACCENT_HOVER = "hover:bg-[#6C7E8B]";
+
+  // ✅ Step 1：未正式登入 → 不准進工作室（直接導 login）
   useEffect(() => {
     if (authLoading) return;
-    if (!user) return;
+
+    if (!isLoggedIn) {
+      const next = "/cool-studio" + (qs ? `?${qs}` : "");
+      router.replace(`/login?next=${encodeURIComponent(next)}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading, isLoggedIn, qs]);
+
+  // ✅ 讀取 username 當作者顯示（只在正式登入後）
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isLoggedIn || !user) return;
 
     let cancelled = false;
 
@@ -60,7 +90,7 @@ export default function CoolStudioPage() {
         const fallback = (user.displayName ?? "").trim();
 
         if (!cancelled) setAuthorName(uname || fallback || "匿名");
-      } catch (e) {
+      } catch {
         const fallback = (user.displayName ?? "").trim();
         if (!cancelled) setAuthorName(fallback || "匿名");
       }
@@ -69,77 +99,102 @@ export default function CoolStudioPage() {
     return () => {
       cancelled = true;
     };
-  }, [authLoading, user?.uid, user?.displayName, user]);
+  }, [authLoading, isLoggedIn, user?.uid, user?.displayName, user]);
 
-  // ✅ boot：有 id 就開，沒 id 只建一次並 replace URL
+  // ✅ Step 2：有 id 才開啟文章；沒有 id 不自動建草稿（止血爆草稿）
   useEffect(() => {
     if (authLoading) return;
+    if (!isLoggedIn || !user) return;
 
     const runId = ++runIdRef.current;
 
-    const boot = async () => {
-      setLoading(true);
+    // 沒 id：回到「入口狀態」，不做任何 Firestore 寫入
+    if (!id) {
+      setPostId(null);
+      setStatus("draft");
+      setTitle("");
+      setContent("");
+      setLastSaved(null);
+      setLoading(false);
+      return;
+    }
 
+    // 有 id：開該篇
+    setLoading(true);
+
+    (async () => {
       try {
-        if (!user) {
-          const next = "/cool-studio" + (qs ? `?${qs}` : "");
-          router.replace(`/login?next=${encodeURIComponent(next)}`);
-          return;
-        }
-
-        const id = searchParams.get("id");
-
-        // 1) 有 id：開該篇
-        if (id) {
-          const post = await getPost(id);
-          if (runIdRef.current !== runId) return;
-
-          if (!post) {
-            alert("找不到文章（可能被刪除或沒權限）。");
-            router.replace("/cool-studio");
-            return;
-          }
-
-          // ✅ 草稿防呆：不是自己的草稿就不要開（正式權限仍要靠 Firestore rules）
-          const postAuthorId = (post as any)?.authorId as string | undefined;
-          const postStatus = (post as any)?.status as string | undefined;
-
-          if (postStatus === "draft" && postAuthorId && postAuthorId !== user.uid) {
-            alert("你沒有權限開啟這篇草稿。");
-            router.replace("/cool-studio");
-            return;
-          }
-
-          setPostId(post.id);
-          setStatus(((post.status as PostStatus) ?? "draft") as PostStatus);
-          setTitle(post.title ?? "");
-          setContent(post.content ?? "");
-          return;
-        }
-
-        // 2) 沒 id：建立一次草稿，並把 URL 替換成帶 id（避免刷新重建）
-        const newId = await createDraft(user.uid, authorNameRef.current);
+        const post = await getPost(id);
         if (runIdRef.current !== runId) return;
 
-        setPostId(newId);
-        setStatus("draft");
-        setTitle("");
-        setContent("");
+        if (!post) {
+          alert("找不到文章（可能被刪除或沒權限）。");
+          router.replace("/cool-studio");
+          return;
+        }
 
-        router.replace(`/cool-studio?id=${newId}`);
+        const postAuthorId = (post as any)?.authorId as string | undefined;
+        const postStatus = (post as any)?.status as string | undefined;
+
+        // ✅ 草稿防呆：不是自己的草稿不准開
+        if (postStatus === "draft" && postAuthorId && postAuthorId !== user.uid) {
+          alert("你沒有權限開啟這篇草稿。");
+          router.replace("/cool-studio");
+          return;
+        }
+
+        setPostId(post.id);
+        setStatus(((post.status as PostStatus) ?? "draft") as PostStatus);
+        setTitle(post.title ?? "");
+        setContent(post.content ?? "");
       } catch (e) {
-        console.error("Studio boot failed:", e);
-        alert("工作室初始化失敗（請看 Console 錯誤）");
+        console.error("Studio open failed:", e);
+        alert("工作室載入失敗（請看 Console 錯誤）");
+        router.replace("/cool-studio");
       } finally {
         if (runIdRef.current === runId) setLoading(false);
       }
-    };
-
-    boot();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authLoading, user?.uid, qs]); // ✅ 不要依賴 authorName
+  }, [authLoading, isLoggedIn, user?.uid, id]);
+
+  // ✅ 明確按鈕建立草稿（不再自動）
+  const handleCreateDraft = async () => {
+    if (!isLoggedIn || !user) return;
+    if (creatingDraft) return;
+
+    // ✅ 如果已經在編輯某篇，就不允許再新增，避免「手滑一直噴草稿」
+    if (postId) return;
+
+    setCreatingDraft(true);
+    setLoading(true);
+
+    const runId = ++runIdRef.current;
+
+    try {
+      const newId = await createDraft(user.uid, authorNameRef.current);
+      if (runIdRef.current !== runId) return;
+
+      setPostId(newId);
+      setStatus("draft");
+      setTitle("");
+      setContent("");
+      setLastSaved(null);
+
+      router.replace(`/cool-studio?id=${newId}`);
+    } catch (e) {
+      console.error("Create draft failed:", e);
+      alert("新增草稿失敗（請看 Console）");
+    } finally {
+      if (runIdRef.current === runId) {
+        setLoading(false);
+        setCreatingDraft(false);
+      }
+    }
+  };
 
   const handleSave = async () => {
+    if (!isLoggedIn || !user) return;
     if (!postId || isSaving) return;
     if (status === "published") return;
 
@@ -160,7 +215,6 @@ export default function CoolStudioPage() {
 
     setContent((prev) => prev + "\n\n" + text);
 
-    // 讓體驗更像「接續寫作」：自動捲到底（下一個 tick）
     setTimeout(() => {
       const ta = textareaRef.current;
       if (!ta) return;
@@ -170,6 +224,7 @@ export default function CoolStudioPage() {
   };
 
   const handlePublish = async () => {
+    if (!isLoggedIn || !user) return;
     if (!postId || isPublishing) return;
 
     if (!title.trim() || !content.trim()) {
@@ -193,24 +248,18 @@ export default function CoolStudioPage() {
     }
   };
 
-  // ====== Morandi Tokens ======
-  const BG = "bg-[#F4F1EC]";
-  const BG_SOFT = "bg-[#E9E4DC]";
-  const CARD = "bg-[#F8F6F2]";
-  const BORDER = "border-[#D8D2C8]";
-  const TEXT_MAIN = "text-[#2F2F2F]";
-  const TEXT_SUB = "text-[#6B6B6B]";
-  const TEXT_MUTE = "text-[#8A8A8A]";
-  const ACCENT = "bg-[#7A8C99]";
-  const ACCENT_HOVER = "hover:bg-[#6C7E8B]";
+  // =========================
+  // Render Gates
+  // =========================
 
-  if (authLoading || loading || !postId) {
+  // ✅ auth 還在確認：顯示載入
+  if (authLoading) {
     return (
       <div className={`min-h-screen ${BG} ${TEXT_MAIN} flex items-center justify-center`}>
         <div className="w-full max-w-sm px-6">
           <div className={`rounded-2xl border ${BORDER} ${CARD} p-5 shadow-sm`}>
             <div className="text-base font-medium">準備工作室中…</div>
-            <div className={`mt-2 text-sm ${TEXT_SUB}`}>正在載入草稿與權限狀態</div>
+            <div className={`mt-2 text-sm ${TEXT_SUB}`}>正在確認登入狀態</div>
             <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-[#DED7CD]">
               <div className="h-full w-1/2 animate-pulse rounded-full bg-[#7A8C99]" />
             </div>
@@ -219,6 +268,100 @@ export default function CoolStudioPage() {
       </div>
     );
   }
+
+  // ✅ 未正式登入（含匿名）：不給進（這裡是保底，通常已被 router.replace 走了）
+  if (!isLoggedIn) {
+    return (
+      <main className={`min-h-screen ${BG} ${TEXT_MAIN} flex items-center justify-center px-6`}>
+        <div className={`w-full max-w-md rounded-2xl border ${BORDER} ${CARD} p-6 shadow-sm`}>
+          <div className="text-lg font-semibold">需要登入才能使用工作室</div>
+          <div className={`mt-2 text-sm ${TEXT_SUB}`}>
+            你目前是訪客狀態。登入後才能建立草稿、使用 AI 輔助與發布作品。
+          </div>
+
+          <div className="mt-5 flex gap-2">
+            <button
+              onClick={() => {
+                const next = "/cool-studio" + (qs ? `?${qs}` : "");
+                router.replace(`/login?next=${encodeURIComponent(next)}`);
+              }}
+              className={`rounded-xl px-4 py-2 text-sm font-medium text-white ${ACCENT} ${ACCENT_HOVER}`}
+            >
+              去登入
+            </button>
+
+            <button
+              onClick={() => router.push("/cool-square")}
+              className={`rounded-xl border ${BORDER} ${CARD} px-4 py-2 text-sm hover:${BG_SOFT}`}
+            >
+              先逛爽文廣場
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ✅ 正式登入但沒有 id：顯示入口頁（不自動建草稿）
+  if (!postId && !loading) {
+    return (
+      <main className={`min-h-screen ${BG} ${TEXT_MAIN}`}>
+        <div className="mx-auto max-w-4xl px-4 pt-10 md:px-6">
+          <div className={`rounded-2xl border ${BORDER} ${CARD} p-6 shadow-sm`}>
+            <div className="text-xl font-semibold">Cool Studio</div>
+            <div className={`mt-2 text-sm ${TEXT_SUB}`}>
+              你已登入。按下「新增草稿」才會建立一篇草稿（不再自動生成，避免爆資料）。
+            </div>
+
+            <div className="mt-6 flex flex-wrap gap-2">
+              <button
+                onClick={handleCreateDraft}
+                disabled={creatingDraft}
+                className={`rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-60 ${ACCENT} ${ACCENT_HOVER}`}
+              >
+                {creatingDraft ? "建立中…" : "新增草稿"}
+              </button>
+
+              <button
+                onClick={() => router.push("/account")}
+                className={`rounded-xl border ${BORDER} ${CARD} px-4 py-2 text-sm hover:${BG_SOFT}`}
+              >
+                去個人頁看我的草稿
+              </button>
+            </div>
+          </div>
+
+          <div className={`mt-4 rounded-2xl border ${BORDER} ${CARD} p-5 shadow-sm`}>
+            <div className="text-sm font-medium">提示</div>
+            <div className={`mt-1 text-sm ${TEXT_SUB}`}>
+              之後我們會把這頁做成「草稿列表 + 新增草稿」的真正入口（更合理）。
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ✅ 有 id 但正在載入文章
+  if (loading || !postId) {
+    return (
+      <div className={`min-h-screen ${BG} ${TEXT_MAIN} flex items-center justify-center`}>
+        <div className="w-full max-w-sm px-6">
+          <div className={`rounded-2xl border ${BORDER} ${CARD} p-5 shadow-sm`}>
+            <div className="text-base font-medium">準備工作室中…</div>
+            <div className={`mt-2 text-sm ${TEXT_SUB}`}>正在載入草稿</div>
+            <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-[#DED7CD]">
+              <div className="h-full w-1/2 animate-pulse rounded-full bg-[#7A8C99]" />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================
+  // Editor UI（你原本的 UI 下面保持）
+  // =========================
 
   const wordCount = content.trim() ? content.trim().replace(/\s+/g, "").length : 0;
   const approxMin = Math.max(1, Math.round(wordCount / 450));

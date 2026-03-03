@@ -84,6 +84,9 @@ async function getUserPublicMeta(
  * ⚠️ 重點：不要寫 publishedAt（Firestore 不能是 undefined）
  */
 export async function createDraft(authorId: string, authorName: string) {
+  // ✅ GUARD：正常流程不影響；只有 authorId 真的不見才會擋
+  if (!authorId) throw new Error("createDraft: missing authorId");
+
   const ref = doc(collection(db, COL));
 
   // ✅ 把 username / photoURL 一起寫進 post（避免廣場 N+1 查 users）
@@ -111,6 +114,9 @@ export async function createDraft(authorId: string, authorName: string) {
 
 /** 取得單篇 */
 export async function getPost(id: string): Promise<CoolPost | null> {
+  // ✅ GUARD：避免空字串造成無謂 getDoc
+  if (!id) return null;
+
   const ref = doc(db, COL, id);
   const snap = await getDoc(ref);
   if (!snap.exists()) return null;
@@ -165,6 +171,9 @@ export async function updatePost(
 
 /** 發布 */
 export async function publishPost(id: string) {
+  // ✅ GUARD：正常流程不影響；只有 id 不見才會擋
+  if (!id) throw new Error("publishPost: missing id");
+
   const ref = doc(db, COL, id);
 
   // ✅ 發布時確保作者 username/photoURL 補齊（舊草稿也能補到）
