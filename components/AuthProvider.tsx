@@ -45,6 +45,27 @@ function snapshotUser(u: User | null) {
   };
 }
 
+// ✅ 用 sessionStorage 記「剛剛有走 redirect」：避免回來那瞬間被匿名搶走
+const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending";
+
+function hasRedirectPending() {
+  try {
+    if (typeof window === "undefined") return false;
+    return window.sessionStorage.getItem(REDIRECT_PENDING_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function clearRedirectPending() {
+  try {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.removeItem(REDIRECT_PENDING_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 export default function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,6 +86,11 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
           "[Auth] redirect result:",
           JSON.stringify(snapshotUser(res?.user ?? null))
         );
+
+        // ✅ 如果 redirect 真的帶回 user：清掉 pending
+        if (res?.user) {
+          clearRedirectPending();
+        }
       } catch (e: any) {
         const code = e?.code ?? null;
         const message = e?.message ?? String(e);
@@ -85,6 +111,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
                 "[Auth] fallback signInWithCredential success:",
                 JSON.stringify(snapshotUser(res2.user))
               );
+              clearRedirectPending();
             } else {
               console.warn("[Auth] credentialFromError returned null");
             }
@@ -106,16 +133,61 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
           JSON.stringify(snapshotUser(firebaseUser))
         );
 
+        // ✅ 有 user（包含匿名/正式）就結束 loading
         if (firebaseUser) {
           setUser(firebaseUser);
           setLoading(false);
+
+          // 如果已經不是 pending，就順手清掉（避免卡住）
+          if (!firebaseUser.isAnonymous) clearRedirectPending();
+
           return;
         }
 
-        // ✅ 3) 沒登入 → 自動匿名
+        // ✅ 3) 沒登入 → 自動匿名（但要避開 redirect 回來那個瞬間）
         if (!didTryAnonymousRef.current) {
           didTryAnonymousRef.current = true;
 
+          // ⛑️ 如果剛剛走過 redirect：多等一下，讓 Firebase finalize session
+          if (hasRedirectPending()) {
+            // 給 redirect 多一點時間（手機常比較慢）
+            await new Promise((r) => setTimeout(r, 2200));
+
+            // 再看一次 currentUser
+            const uWait = auth.currentUser;
+            if (uWait) {
+              console.log(
+                "[Auth] pending redirect -> currentUser is ready:",
+                JSON.stringify(snapshotUser(uWait))
+              );
+              setUser(uWait);
+              setLoading(false);
+              clearRedirectPending();
+              return;
+            }
+
+            // 再補一次 getRedirectResult（有時第一次太早拿會是 null）
+            try {
+              const rr = await getRedirectResult(auth);
+              console.log(
+                "[Auth] pending redirect -> retry redirect result:",
+                JSON.stringify(snapshotUser(rr?.user ?? null))
+              );
+              if (rr?.user) {
+                setUser(rr.user);
+                setLoading(false);
+                clearRedirectPending();
+                return;
+              }
+            } catch (eRetry: any) {
+              console.warn("[Auth] pending redirect -> retry getRedirectResult failed:", {
+                code: eRetry?.code ?? null,
+                message: eRetry?.message ?? String(eRetry),
+              });
+            }
+          }
+
+          // 原本的 300ms 邏輯保留
           await new Promise((r) => setTimeout(r, 300));
 
           const u2 = auth.currentUser;

@@ -91,17 +91,20 @@ export default function Navbar() {
       provider.setCustomParameters({ prompt: "select_account" });
 
       const mobile = isProbablyMobile();
-      console.log("[Navbar] Google login clicked:", { mobile, current: snapAuthUser() });
+      console.log("[Navbar] Google login clicked:", {
+        mobile,
+        current: snapAuthUser(),
+      });
 
-      // ✅ 核心：不要再 link（匿名升級）了
-      // 因為你的 log 已經出現 auth/credential-already-in-use（Google credential 已綁到別的 user）
-      // 直接登入到 Google 的 user 才是正確路線
+      // ✅ 手機：redirect（並記 pending，避免回來瞬間被匿名搶走）
       if (mobile) {
         console.log("[Navbar] mobile -> signInWithRedirect");
+        sessionStorage.setItem("muu_auth_redirect_pending", "1");
         await signInWithRedirect(auth, provider);
         return;
       }
 
+      // ✅ 桌機：popup
       console.log("[Navbar] desktop -> signInWithPopup");
       await signInWithPopup(auth, provider);
 
@@ -122,6 +125,7 @@ export default function Navbar() {
           const provider = new GoogleAuthProvider();
           provider.setCustomParameters({ prompt: "select_account" });
           console.warn("[Navbar] popup blocked/closed -> fallback redirect");
+          sessionStorage.setItem("muu_auth_redirect_pending", "1");
           await signInWithRedirect(auth, provider);
           return;
         } catch (e2: any) {
@@ -132,7 +136,9 @@ export default function Navbar() {
         }
       }
 
-      alert("Google 登入失敗。請開 Console 看錯誤 code（常見：unauthorized-domain / popup-blocked）。");
+      alert(
+        "Google 登入失敗。請開 Console 看錯誤 code（常見：unauthorized-domain / popup-blocked）。"
+      );
     } finally {
       setGoogleLoading(false);
     }
@@ -271,7 +277,9 @@ export default function Navbar() {
                     </span>
                   )}
                 </span>
-                <span className="hidden md:inline max-w-[140px] truncate">{displayName}</span>
+                <span className="hidden md:inline max-w-[140px] truncate">
+                  {displayName}
+                </span>
                 <span className="text-xs">▾</span>
               </button>
 
