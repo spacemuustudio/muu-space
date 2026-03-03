@@ -17,6 +17,8 @@ import {
   signInWithCredential,
   GoogleAuthProvider,
   type User,
+  setPersistence,
+  browserLocalPersistence,
 } from "firebase/auth";
 
 type AuthContextValue = {
@@ -45,37 +47,80 @@ function snapshotUser(u: User | null) {
   };
 }
 
-/**
- * ✅ 用 localStorage 記「剛剛有走 redirect」：避免回來那瞬間被匿名搶走
- * - iOS / in-app browser 對 sessionStorage 有時不穩
- * - 存 timestamp 方便過期
- */
-const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_ts";
+// ✅ pending key：sessionStorage + localStorage 都寫，避免手機跳新分頁 sessionStorage 消失
+const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_v1";
 
-function getRedirectPendingTs(): number | null {
+function setRedirectPending() {
   try {
-    if (typeof window === "undefined") return null;
-    const v = window.localStorage.getItem(REDIRECT_PENDING_KEY);
-    if (!v) return null;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem(REDIRECT_PENDING_KEY, "1");
+    window.localStorage.setItem(REDIRECT_PENDING_KEY, "1");
   } catch {
-    return null;
+    // ignore
   }
 }
 
-function hasRedirectPending(maxAgeMs = 60_000) {
-  const ts = getRedirectPendingTs();
-  if (!ts) return false;
-  return Date.now() - ts < maxAgeMs;
+function hasRedirectPending() {
+  try {
+    if (typeof window === "undefined") return false;
+    return (
+      window.sessionStorage.getItem(REDIRECT_PENDING_KEY) === "1" ||
+      window.localStorage.getItem(REDIRECT_PENDING_KEY) === "1"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function clearRedirectPending() {
   try {
     if (typeof window === "undefined") return;
+    window.sessionStorage.removeItem(REDIRECT_PENDING_KEY);
     window.localStorage.removeItem(REDIRECT_PENDING_KEY);
   } catch {
     // ignore
+  }
+}
+
+async function tryGetRedirectResultOnce(tag: string) {
+  try {
+    const res = await getRedirectResult(auth);
+    console.log(
+      `[Auth] ${tag} redirect result:`,
+      JSON.stringify(snapshotUser(res?.user ?? null))
+    );
+    return res?.user ?? null;
+  } catch (e: any) {
+    const code = e?.code ?? null;
+    const message = e?.message ?? String(e);
+    console.warn(`[Auth] ${tag} getRedirectResult failed:`, { code, message });
+
+    // 若看到 credential already in use，做 fallback
+    if (
+      code === "auth/credential-already-in-use" ||
+      code === "auth/account-exists-with-different-credential"
+    ) {
+      try {
+        const cred = GoogleAuthProvider.credentialFromError(e);
+        if (cred) {
+          const res2 = await signInWithCredential(auth, cred);
+          console.log(
+            "[Auth] fallback signInWithCredential success:",
+            JSON.stringify(snapshotUser(res2.user))
+          );
+          return res2.user;
+        } else {
+          console.warn("[Auth] credentialFromError returned null");
+        }
+      } catch (e2: any) {
+        console.error("[Auth] fallback signInWithCredential failed:", {
+          code: e2?.code ?? null,
+          message: e2?.message ?? String(e2),
+        });
+      }
+    }
+
+    return null;
   }
 }
 
@@ -92,114 +137,85 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     didInitRef.current = true;
 
     const init = async () => {
-      // ✅ 1) 處理 redirect 收尾（手機 redirect 回來主要靠這個）
+      // ✅ 0) 強制設定 persistence（手機更穩）
       try {
-        const res = await getRedirectResult(auth);
-        console.log("[Auth] redirect result:", JSON.stringify(snapshotUser(res?.user ?? null)));
-
-        // ✅ 如果 redirect 真的帶回 user：清掉 pending
-        if (res?.user) {
-          clearRedirectPending();
-        }
-      } catch (e: any) {
-        const code = e?.code ?? null;
-        const message = e?.message ?? String(e);
-        console.warn("[Auth] getRedirectResult failed:", JSON.stringify({ code, message }));
-
-        // 若曾經走過「link」路線，可能會看到這些 error
-        if (
-          code === "auth/credential-already-in-use" ||
-          code === "auth/account-exists-with-different-credential"
-        ) {
-          try {
-            const cred = GoogleAuthProvider.credentialFromError(e);
-            if (cred) {
-              const res2 = await signInWithCredential(auth, cred);
-              console.log(
-                "[Auth] fallback signInWithCredential success:",
-                JSON.stringify(snapshotUser(res2.user))
-              );
-              clearRedirectPending();
-            } else {
-              console.warn("[Auth] credentialFromError returned null");
-            }
-          } catch (e2: any) {
-            console.error("[Auth] fallback signInWithCredential failed:", {
-              code: e2?.code ?? null,
-              message: e2?.message ?? String(e2),
-            });
-          }
-        }
+        await setPersistence(auth, browserLocalPersistence);
+        console.log("[Auth] persistence = browserLocalPersistence");
+      } catch (e) {
+        console.warn("[Auth] setPersistence failed:", e);
       }
 
-      // ✅ 2) 監聽登入狀態
+      // ✅ 1) 先處理 redirect 收尾（一次）
+      const firstRedirectUser = await tryGetRedirectResultOnce("first");
+      if (firstRedirectUser) clearRedirectPending();
+
+      // ✅ 2) 再監聽登入狀態
       const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
         if (!alive) return;
 
-        console.log("[Auth] state changed:", JSON.stringify(snapshotUser(firebaseUser)));
+        console.log(
+          "[Auth] state changed:",
+          JSON.stringify(snapshotUser(firebaseUser))
+        );
 
-        // ✅ 有 user（包含匿名/正式）就結束 loading
-        if (firebaseUser) {
+        // ✅ 如果回來就已經有正式 user：直接結束
+        if (firebaseUser && !firebaseUser.isAnonymous) {
           setUser(firebaseUser);
           setLoading(false);
-
-          // ✅ 一旦拿到「非匿名」就一定清 pending（避免卡住）
-          if (!firebaseUser.isAnonymous) clearRedirectPending();
-
+          clearRedirectPending();
           return;
         }
 
-        // ✅ 3) 沒登入 → 自動匿名（但要避開 redirect 回來那個瞬間）
-        if (!didTryAnonymousRef.current) {
-          didTryAnonymousRef.current = true;
+        // ✅ 如果是匿名 user（或 null），但 pending=true：
+        //    先給 redirect finalize 的時間，重試幾次 getRedirectResult / currentUser
+        if (hasRedirectPending()) {
+          console.log("[Auth] redirect pending detected -> wait & retry");
 
-          // ⛑️ 如果剛剛走過 redirect：先不要匿名，給它時間 finalize
-          if (hasRedirectPending(90_000)) {
-            console.log("[Auth] redirect pending -> delay anonymous");
-
-            // 給 redirect 多一點時間（手機常比較慢）
-            await new Promise((r) => setTimeout(r, 2500));
-
-            // 再看一次 currentUser
-            const uWait = auth.currentUser;
-            if (uWait) {
+          // 這段期間先不要放行成匿名（避免 UI 進入匿名狀態後卡住）
+          // 讓 loading 維持住（最多約 6~7 秒）
+          for (let i = 0; i < 6; i++) {
+            // 1) currentUser 先看一次（有時比 getRedirectResult 快）
+            const cu = auth.currentUser;
+            if (cu && !cu.isAnonymous) {
               console.log(
-                "[Auth] pending redirect -> currentUser is ready:",
-                JSON.stringify(snapshotUser(uWait))
+                "[Auth] pending -> currentUser ready:",
+                JSON.stringify(snapshotUser(cu))
               );
-              setUser(uWait);
+              setUser(cu);
               setLoading(false);
               clearRedirectPending();
               return;
             }
 
-            // 再補一次 getRedirectResult（有時第一次太早拿會是 null）
-            try {
-              const rr = await getRedirectResult(auth);
-              console.log(
-                "[Auth] pending redirect -> retry redirect result:",
-                JSON.stringify(snapshotUser(rr?.user ?? null))
-              );
-              if (rr?.user) {
-                setUser(rr.user);
-                setLoading(false);
-                clearRedirectPending();
-                return;
-              }
-            } catch (eRetry: any) {
-              console.warn("[Auth] pending redirect -> retry getRedirectResult failed:", {
-                code: eRetry?.code ?? null,
-                message: eRetry?.message ?? String(eRetry),
-              });
+            // 2) 再補 getRedirectResult
+            const rrUser = await tryGetRedirectResultOnce(`retry#${i + 1}`);
+            if (rrUser) {
+              setUser(rrUser);
+              setLoading(false);
+              clearRedirectPending();
+              return;
             }
 
-            // ✅ pending 超時就清掉，避免永遠不匿名
-            if (!hasRedirectPending(90_000)) {
-              clearRedirectPending();
-            }
+            // 3) 等一下再試
+            await new Promise((r) => setTimeout(r, 1100));
           }
 
-          // 原本的 300ms 邏輯保留
+          // 真的沒拿到 -> 清掉 pending，讓流程繼續（才會去匿名）
+          console.warn("[Auth] pending timeout -> clear pending and continue");
+          clearRedirectPending();
+        }
+
+        // ✅ 有 user（即使匿名）也可以結束 loading
+        if (firebaseUser) {
+          setUser(firebaseUser);
+          setLoading(false);
+          return;
+        }
+
+        // ✅ 3) 沒登入 -> 自動匿名（只做一次）
+        if (!didTryAnonymousRef.current) {
+          didTryAnonymousRef.current = true;
+
           await new Promise((r) => setTimeout(r, 300));
 
           const u2 = auth.currentUser;
@@ -228,7 +244,6 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     let unsub: (() => void) | null = null;
-
     (async () => {
       unsub = await init();
     })();
@@ -241,7 +256,6 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<AuthContextValue>(() => {
     const isAnon = !!user?.isAnonymous;
-
     return {
       user,
       loading,
@@ -250,7 +264,6 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [user, loading]);
 
-  // ✅ 不使用 h-screen，避免干擾 layout 結構
   if (loading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center text-sm text-neutral-500">
@@ -261,3 +274,6 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
+
+// ✅ 這行 export 給 Navbar 用（避免你再複製 key 名稱）
+export { setRedirectPending };

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { BookOpen, PenLine, Circle, User, LogOut } from "lucide-react";
 
-import { useAuth } from "@/components/AuthProvider";
+import { useAuth, setRedirectPending } from "@/components/AuthProvider";
 import { auth } from "@/lib/firebase";
 import {
   GoogleAuthProvider,
@@ -32,18 +32,6 @@ function snapAuthUser() {
   };
 }
 
-// ✅ 跟 AuthProvider 用同一個 key（localStorage + timestamp）
-const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_ts";
-
-function markRedirectPending() {
-  try {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
-  } catch {
-    // ignore
-  }
-}
-
 export default function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -59,7 +47,8 @@ export default function Navbar() {
 
   const { user, loading: authLoading, isLoggedIn } = useAuth();
 
-  const isActive = (href: string) => pathname === href || pathname?.startsWith(href + "/");
+  const isActive = (href: string) =>
+    pathname === href || pathname?.startsWith(href + "/");
 
   useEffect(() => {
     setInnerOpen(false);
@@ -69,8 +58,10 @@ export default function Navbar() {
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (userOpen && userMenuRef.current && !userMenuRef.current.contains(t)) setUserOpen(false);
-      if (innerOpen && innerMenuRef.current && !innerMenuRef.current.contains(t)) setInnerOpen(false);
+      if (userOpen && userMenuRef.current && !userMenuRef.current.contains(t))
+        setUserOpen(false);
+      if (innerOpen && innerMenuRef.current && !innerMenuRef.current.contains(t))
+        setInnerOpen(false);
     };
 
     document.addEventListener("mousedown", onDoc);
@@ -96,17 +87,18 @@ export default function Navbar() {
       provider.setCustomParameters({ prompt: "select_account" });
 
       const mobile = isProbablyMobile();
-      console.log("[Navbar] Google login clicked:", { mobile, current: snapAuthUser() });
+      console.log("[Navbar] Google login clicked:", {
+        mobile,
+        current: snapAuthUser(),
+      });
 
-      // ✅ 手機：redirect（並記 pending，避免回來瞬間被匿名搶走）
       if (mobile) {
         console.log("[Navbar] mobile -> signInWithRedirect");
-        markRedirectPending();
+        setRedirectPending();
         await signInWithRedirect(auth, provider);
         return;
       }
 
-      // ✅ 桌機：popup
       console.log("[Navbar] desktop -> signInWithPopup");
       await signInWithPopup(auth, provider);
 
@@ -118,13 +110,12 @@ export default function Navbar() {
         message: e?.message ?? String(e),
       });
 
-      // popup 被擋/被關：fallback redirect
       if (e?.code === "auth/popup-blocked" || e?.code === "auth/popup-closed-by-user") {
         try {
           const provider = new GoogleAuthProvider();
           provider.setCustomParameters({ prompt: "select_account" });
           console.warn("[Navbar] popup blocked/closed -> fallback redirect");
-          markRedirectPending();
+          setRedirectPending();
           await signInWithRedirect(auth, provider);
           return;
         } catch (e2: any) {
@@ -209,24 +200,9 @@ export default function Navbar() {
 
             {innerOpen && (
               <div className="absolute left-0 mt-2 w-44 rounded-md border bg-white shadow-lg">
-                <DropdownItem
-                  label="和我們說說"
-                  href="/inner-space"
-                  onDone={() => setInnerOpen(false)}
-                  router={router}
-                />
-                <DropdownItem
-                  label="故事牆"
-                  href="/stories"
-                  onDone={() => setInnerOpen(false)}
-                  router={router}
-                />
-                <DropdownItem
-                  label="最近的自己"
-                  href="/me"
-                  onDone={() => setInnerOpen(false)}
-                  router={router}
-                />
+                <DropdownItem label="和我們說說" href="/inner-space" onDone={() => setInnerOpen(false)} router={router} />
+                <DropdownItem label="故事牆" href="/stories" onDone={() => setInnerOpen(false)} router={router} />
+                <DropdownItem label="最近的自己" href="/me" onDone={() => setInnerOpen(false)} router={router} />
               </div>
             )}
           </div>
@@ -263,7 +239,9 @@ export default function Navbar() {
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
                   ) : (
-                    <span className="text-xs text-gray-500">{(displayName?.[0] || "U").toUpperCase()}</span>
+                    <span className="text-xs text-gray-500">
+                      {(displayName?.[0] || "U").toUpperCase()}
+                    </span>
                   )}
                 </span>
                 <span className="hidden md:inline max-w-[140px] truncate">{displayName}</span>
@@ -272,20 +250,8 @@ export default function Navbar() {
 
               {userOpen && (
                 <div className="absolute right-0 mt-2 w-44 rounded-md border bg-white shadow-lg overflow-hidden">
-                  <MenuItem
-                    label="個人頁"
-                    onClick={() => {
-                      setUserOpen(false);
-                      router.push("/account");
-                    }}
-                  />
-                  <MenuItem
-                    label="編輯資料"
-                    onClick={() => {
-                      setUserOpen(false);
-                      router.push("/account/edit");
-                    }}
-                  />
+                  <MenuItem label="個人頁" onClick={() => { setUserOpen(false); router.push("/account"); }} />
+                  <MenuItem label="編輯資料" onClick={() => { setUserOpen(false); router.push("/account/edit"); }} />
                   <div className="h-px bg-gray-100" />
                   <button
                     type="button"
