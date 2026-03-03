@@ -45,22 +45,35 @@ function snapshotUser(u: User | null) {
   };
 }
 
-// ✅ 用 sessionStorage 記「剛剛有走 redirect」：避免回來那瞬間被匿名搶走
-const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending";
+/**
+ * ✅ 用 localStorage 記「剛剛有走 redirect」：避免回來那瞬間被匿名搶走
+ * - iOS / in-app browser 對 sessionStorage 有時不穩
+ * - 存 timestamp 方便過期
+ */
+const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_ts";
 
-function hasRedirectPending() {
+function getRedirectPendingTs(): number | null {
   try {
-    if (typeof window === "undefined") return false;
-    return window.sessionStorage.getItem(REDIRECT_PENDING_KEY) === "1";
+    if (typeof window === "undefined") return null;
+    const v = window.localStorage.getItem(REDIRECT_PENDING_KEY);
+    if (!v) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function hasRedirectPending(maxAgeMs = 60_000) {
+  const ts = getRedirectPendingTs();
+  if (!ts) return false;
+  return Date.now() - ts < maxAgeMs;
 }
 
 function clearRedirectPending() {
   try {
     if (typeof window === "undefined") return;
-    window.sessionStorage.removeItem(REDIRECT_PENDING_KEY);
+    window.localStorage.removeItem(REDIRECT_PENDING_KEY);
   } catch {
     // ignore
   }
@@ -79,13 +92,10 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
     didInitRef.current = true;
 
     const init = async () => {
-      // ✅ 1) 處理 redirect 收尾
+      // ✅ 1) 處理 redirect 收尾（手機 redirect 回來主要靠這個）
       try {
         const res = await getRedirectResult(auth);
-        console.log(
-          "[Auth] redirect result:",
-          JSON.stringify(snapshotUser(res?.user ?? null))
-        );
+        console.log("[Auth] redirect result:", JSON.stringify(snapshotUser(res?.user ?? null)));
 
         // ✅ 如果 redirect 真的帶回 user：清掉 pending
         if (res?.user) {
@@ -94,11 +104,9 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       } catch (e: any) {
         const code = e?.code ?? null;
         const message = e?.message ?? String(e);
-        console.warn(
-          "[Auth] getRedirectResult failed:",
-          JSON.stringify({ code, message })
-        );
+        console.warn("[Auth] getRedirectResult failed:", JSON.stringify({ code, message }));
 
+        // 若曾經走過「link」路線，可能會看到這些 error
         if (
           code === "auth/credential-already-in-use" ||
           code === "auth/account-exists-with-different-credential"
@@ -128,17 +136,14 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
         if (!alive) return;
 
-        console.log(
-          "[Auth] state changed:",
-          JSON.stringify(snapshotUser(firebaseUser))
-        );
+        console.log("[Auth] state changed:", JSON.stringify(snapshotUser(firebaseUser)));
 
         // ✅ 有 user（包含匿名/正式）就結束 loading
         if (firebaseUser) {
           setUser(firebaseUser);
           setLoading(false);
 
-          // 如果已經不是 pending，就順手清掉（避免卡住）
+          // ✅ 一旦拿到「非匿名」就一定清 pending（避免卡住）
           if (!firebaseUser.isAnonymous) clearRedirectPending();
 
           return;
@@ -148,10 +153,12 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
         if (!didTryAnonymousRef.current) {
           didTryAnonymousRef.current = true;
 
-          // ⛑️ 如果剛剛走過 redirect：多等一下，讓 Firebase finalize session
-          if (hasRedirectPending()) {
+          // ⛑️ 如果剛剛走過 redirect：先不要匿名，給它時間 finalize
+          if (hasRedirectPending(90_000)) {
+            console.log("[Auth] redirect pending -> delay anonymous");
+
             // 給 redirect 多一點時間（手機常比較慢）
-            await new Promise((r) => setTimeout(r, 2200));
+            await new Promise((r) => setTimeout(r, 2500));
 
             // 再看一次 currentUser
             const uWait = auth.currentUser;
@@ -184,6 +191,11 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
                 code: eRetry?.code ?? null,
                 message: eRetry?.message ?? String(eRetry),
               });
+            }
+
+            // ✅ pending 超時就清掉，避免永遠不匿名
+            if (!hasRedirectPending(90_000)) {
+              clearRedirectPending();
             }
           }
 

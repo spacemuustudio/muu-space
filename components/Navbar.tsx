@@ -32,6 +32,18 @@ function snapAuthUser() {
   };
 }
 
+// ✅ 跟 AuthProvider 用同一個 key（localStorage + timestamp）
+const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_ts";
+
+function markRedirectPending() {
+  try {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(REDIRECT_PENDING_KEY, String(Date.now()));
+  } catch {
+    // ignore
+  }
+}
+
 export default function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -47,8 +59,7 @@ export default function Navbar() {
 
   const { user, loading: authLoading, isLoggedIn } = useAuth();
 
-  const isActive = (href: string) =>
-    pathname === href || pathname?.startsWith(href + "/");
+  const isActive = (href: string) => pathname === href || pathname?.startsWith(href + "/");
 
   useEffect(() => {
     setInnerOpen(false);
@@ -58,14 +69,8 @@ export default function Navbar() {
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (userOpen && userMenuRef.current && !userMenuRef.current.contains(t))
-        setUserOpen(false);
-      if (
-        innerOpen &&
-        innerMenuRef.current &&
-        !innerMenuRef.current.contains(t)
-      )
-        setInnerOpen(false);
+      if (userOpen && userMenuRef.current && !userMenuRef.current.contains(t)) setUserOpen(false);
+      if (innerOpen && innerMenuRef.current && !innerMenuRef.current.contains(t)) setInnerOpen(false);
     };
 
     document.addEventListener("mousedown", onDoc);
@@ -91,15 +96,12 @@ export default function Navbar() {
       provider.setCustomParameters({ prompt: "select_account" });
 
       const mobile = isProbablyMobile();
-      console.log("[Navbar] Google login clicked:", {
-        mobile,
-        current: snapAuthUser(),
-      });
+      console.log("[Navbar] Google login clicked:", { mobile, current: snapAuthUser() });
 
       // ✅ 手機：redirect（並記 pending，避免回來瞬間被匿名搶走）
       if (mobile) {
         console.log("[Navbar] mobile -> signInWithRedirect");
-        sessionStorage.setItem("muu_auth_redirect_pending", "1");
+        markRedirectPending();
         await signInWithRedirect(auth, provider);
         return;
       }
@@ -117,15 +119,12 @@ export default function Navbar() {
       });
 
       // popup 被擋/被關：fallback redirect
-      if (
-        e?.code === "auth/popup-blocked" ||
-        e?.code === "auth/popup-closed-by-user"
-      ) {
+      if (e?.code === "auth/popup-blocked" || e?.code === "auth/popup-closed-by-user") {
         try {
           const provider = new GoogleAuthProvider();
           provider.setCustomParameters({ prompt: "select_account" });
           console.warn("[Navbar] popup blocked/closed -> fallback redirect");
-          sessionStorage.setItem("muu_auth_redirect_pending", "1");
+          markRedirectPending();
           await signInWithRedirect(auth, provider);
           return;
         } catch (e2: any) {
@@ -136,9 +135,7 @@ export default function Navbar() {
         }
       }
 
-      alert(
-        "Google 登入失敗。請開 Console 看錯誤 code（常見：unauthorized-domain / popup-blocked）。"
-      );
+      alert("Google 登入失敗。請開 Console 看錯誤 code（常見：unauthorized-domain / popup-blocked）。");
     } finally {
       setGoogleLoading(false);
     }
@@ -248,9 +245,7 @@ export default function Navbar() {
 
         <div className="flex items-center gap-2" ref={userMenuRef}>
           {authLoading ? (
-            <div className="text-xs text-gray-500 w-[120px] text-right">
-              載入中…
-            </div>
+            <div className="text-xs text-gray-500 w-[120px] text-right">載入中…</div>
           ) : isLoggedIn ? (
             <div className="relative">
               <button
@@ -266,20 +261,12 @@ export default function Navbar() {
                 >
                   {avatarUrl ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={avatarUrl}
-                      alt=""
-                      className="h-full w-full object-cover"
-                    />
+                    <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
                   ) : (
-                    <span className="text-xs text-gray-500">
-                      {(displayName?.[0] || "U").toUpperCase()}
-                    </span>
+                    <span className="text-xs text-gray-500">{(displayName?.[0] || "U").toUpperCase()}</span>
                   )}
                 </span>
-                <span className="hidden md:inline max-w-[140px] truncate">
-                  {displayName}
-                </span>
+                <span className="hidden md:inline max-w-[140px] truncate">{displayName}</span>
                 <span className="text-xs">▾</span>
               </button>
 
