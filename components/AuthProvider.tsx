@@ -7,62 +7,97 @@ import {
   useMemo,
   useRef,
   useState,
-  ReactNode,
+  type ReactNode,
 } from "react";
 import { auth } from "@/lib/firebase";
+import type { FirebaseError } from "firebase/app";
 import {
-  onAuthStateChanged,
-  signInAnonymously,
-  getRedirectResult,
-  signInWithCredential,
   GoogleAuthProvider,
-  type User,
-  setPersistence,
   browserLocalPersistence,
+  getRedirectResult,
+  linkWithRedirect,
+  onAuthStateChanged,
+  setPersistence,
+  signInAnonymously,
+  signInWithCredential,
+  signInWithPopup,
+  signInWithRedirect,
+  signOut,
+  type User,
 } from "firebase/auth";
 
 type AuthContextValue = {
   user: User | null;
   loading: boolean;
+  authReady: boolean;
   isAnonymous: boolean;
-  isLoggedIn: boolean; // 只有非匿名才算正式登入
+  isLoggedIn: boolean;
+  signInWithGoogle: () => Promise<void>;
+  logout: () => Promise<void>;
+};
+
+type AuthErrorLike = {
+  code?: string;
+  message?: string;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth 必須在 <AuthProvider> 裡使用");
-  return ctx;
-}
+const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_v1";
+const REDIRECT_SETTLE_TIMEOUT_MS = 8000;
+const ANONYMOUS_BOOTSTRAP_DELAY_MS = 150;
 
-function snapshotUser(u: User | null) {
-  if (!u) return null;
+function readAuthError(error: unknown): AuthErrorLike {
+  if (error && typeof error === "object") {
+    const candidate = error as AuthErrorLike;
+    return {
+      code: candidate.code,
+      message: candidate.message,
+    };
+  }
+
   return {
-    uid: u.uid,
-    isAnonymous: u.isAnonymous,
-    email: u.email ?? null,
-    displayName: u.displayName ?? null,
-    providerIds: (u.providerData || []).map((p) => p.providerId),
+    message: String(error),
   };
 }
 
-// ✅ pending key：sessionStorage + localStorage 都寫，避免手機跳新分頁 sessionStorage 消失
-const REDIRECT_PENDING_KEY = "muu_auth_redirect_pending_v1";
+function snapshotUser(user: User | null) {
+  if (!user) return null;
+
+  return {
+    uid: user.uid,
+    isAnonymous: user.isAnonymous,
+    email: user.email ?? null,
+    displayName: user.displayName ?? null,
+    providerIds: (user.providerData || []).map((provider) => provider.providerId),
+  };
+}
+
+function isProbablyMobileBrowser() {
+  if (typeof window === "undefined") return false;
+
+  const smallViewport = window.matchMedia?.("(max-width: 768px)")?.matches ?? false;
+  const userAgent = navigator.userAgent || "";
+  const mobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent);
+
+  return smallViewport || mobileUA;
+}
 
 function setRedirectPending() {
+  if (typeof window === "undefined") return;
+
   try {
-    if (typeof window === "undefined") return;
     window.sessionStorage.setItem(REDIRECT_PENDING_KEY, "1");
     window.localStorage.setItem(REDIRECT_PENDING_KEY, "1");
   } catch {
-    // ignore
+    console.warn("[Auth] failed to mark redirect as pending");
   }
 }
 
 function hasRedirectPending() {
+  if (typeof window === "undefined") return false;
+
   try {
-    if (typeof window === "undefined") return false;
     return (
       window.sessionStorage.getItem(REDIRECT_PENDING_KEY) === "1" ||
       window.localStorage.getItem(REDIRECT_PENDING_KEY) === "1"
@@ -73,49 +108,57 @@ function hasRedirectPending() {
 }
 
 function clearRedirectPending() {
+  if (typeof window === "undefined") return;
+
   try {
-    if (typeof window === "undefined") return;
     window.sessionStorage.removeItem(REDIRECT_PENDING_KEY);
     window.localStorage.removeItem(REDIRECT_PENDING_KEY);
   } catch {
-    // ignore
+    console.warn("[Auth] failed to clear redirect pending marker");
   }
 }
 
-async function tryGetRedirectResultOnce(tag: string) {
+async function recoverRedirectResult(label: string) {
   try {
-    const res = await getRedirectResult(auth);
-    console.log(
-      `[Auth] ${tag} redirect result:`,
-      JSON.stringify(snapshotUser(res?.user ?? null))
-    );
-    return res?.user ?? null;
-  } catch (e: any) {
-    const code = e?.code ?? null;
-    const message = e?.message ?? String(e);
-    console.warn(`[Auth] ${tag} getRedirectResult failed:`, { code, message });
+    const result = await getRedirectResult(auth);
+    const redirectUser = result?.user ?? null;
 
-    // 若看到 credential already in use，做 fallback
+    console.log("[Auth] redirect result", {
+      label,
+      user: snapshotUser(redirectUser),
+    });
+
+    return redirectUser;
+  } catch (error: unknown) {
+    const { code, message } = readAuthError(error);
+
+    console.warn("[Auth] getRedirectResult failed", { label, code, message });
+
     if (
       code === "auth/credential-already-in-use" ||
       code === "auth/account-exists-with-different-credential"
     ) {
       try {
-        const cred = GoogleAuthProvider.credentialFromError(e);
-        if (cred) {
-          const res2 = await signInWithCredential(auth, cred);
-          console.log(
-            "[Auth] fallback signInWithCredential success:",
-            JSON.stringify(snapshotUser(res2.user))
-          );
-          return res2.user;
-        } else {
+        const credential = GoogleAuthProvider.credentialFromError(error as FirebaseError);
+
+        if (!credential) {
           console.warn("[Auth] credentialFromError returned null");
+          return null;
         }
-      } catch (e2: any) {
-        console.error("[Auth] fallback signInWithCredential failed:", {
-          code: e2?.code ?? null,
-          message: e2?.message ?? String(e2),
+
+        const retryResult = await signInWithCredential(auth, credential);
+        console.log("[Auth] recovered with signInWithCredential", {
+          label,
+          user: snapshotUser(retryResult.user),
+        });
+        return retryResult.user;
+      } catch (retryError: unknown) {
+        const retryMeta = readAuthError(retryError);
+
+        console.error("[Auth] signInWithCredential recovery failed", {
+          label,
+          code: retryMeta.code ?? null,
+          message: retryMeta.message ?? null,
         });
       }
     }
@@ -124,156 +167,345 @@ async function tryGetRedirectResultOnce(tag: string) {
   }
 }
 
+export function useAuth() {
+  const context = useContext(AuthContext);
+
+  if (!context) {
+    throw new Error("useAuth must be used inside <AuthProvider>");
+  }
+
+  return context;
+}
+
 export default function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [authReady, setAuthReady] = useState(false);
+  const [redirectRecovering, setRedirectRecovering] = useState(false);
 
-  const didTryAnonymousRef = useRef(false);
-  const didInitRef = useRef(false);
+  const mountedRef = useRef(true);
+  const authChangeRunRef = useRef(0);
+  const redirectPendingRef = useRef(false);
+  const redirectRecoveryStartedRef = useRef(false);
+  const redirectRecoveryFinishedRef = useRef(false);
+  const redirectRecoveryPromiseRef = useRef<Promise<User | null> | null>(null);
+  const redirectRecoveryResolverRef = useRef<((user: User | null) => void) | null>(null);
+  const redirectRecoveryTimeoutRef = useRef<number | null>(null);
+  const anonymousBootstrapRef = useRef(false);
+  const anonymousDeferredLogRef = useRef(false);
 
   useEffect(() => {
-    let alive = true;
-    if (didInitRef.current) return;
-    didInitRef.current = true;
+    mountedRef.current = true;
+    redirectPendingRef.current = hasRedirectPending();
 
-    const init = async () => {
-      // ✅ 0) 強制設定 persistence（手機更穩）
-      try {
-        await setPersistence(auth, browserLocalPersistence);
-        console.log("[Auth] persistence = browserLocalPersistence");
-      } catch (e) {
-        console.warn("[Auth] setPersistence failed:", e);
+    let unsubscribe: (() => void) | null = null;
+
+    const clearRedirectRecoveryTimeout = () => {
+      if (redirectRecoveryTimeoutRef.current !== null) {
+        window.clearTimeout(redirectRecoveryTimeoutRef.current);
+        redirectRecoveryTimeoutRef.current = null;
       }
-
-      // ✅ 1) 先處理 redirect 收尾（一次）
-      const firstRedirectUser = await tryGetRedirectResultOnce("first");
-      if (firstRedirectUser) clearRedirectPending();
-
-      // ✅ 2) 再監聽登入狀態
-      const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-        if (!alive) return;
-
-        console.log(
-          "[Auth] state changed:",
-          JSON.stringify(snapshotUser(firebaseUser))
-        );
-
-        // ✅ 如果回來就已經有正式 user：直接結束
-        if (firebaseUser && !firebaseUser.isAnonymous) {
-          setUser(firebaseUser);
-          setLoading(false);
-          clearRedirectPending();
-          return;
-        }
-
-        // ✅ 如果是匿名 user（或 null），但 pending=true：
-        //    先給 redirect finalize 的時間，重試幾次 getRedirectResult / currentUser
-        if (hasRedirectPending()) {
-          console.log("[Auth] redirect pending detected -> wait & retry");
-
-          // 這段期間先不要放行成匿名（避免 UI 進入匿名狀態後卡住）
-          // 讓 loading 維持住（最多約 6~7 秒）
-          for (let i = 0; i < 6; i++) {
-            // 1) currentUser 先看一次（有時比 getRedirectResult 快）
-            const cu = auth.currentUser;
-            if (cu && !cu.isAnonymous) {
-              console.log(
-                "[Auth] pending -> currentUser ready:",
-                JSON.stringify(snapshotUser(cu))
-              );
-              setUser(cu);
-              setLoading(false);
-              clearRedirectPending();
-              return;
-            }
-
-            // 2) 再補 getRedirectResult
-            const rrUser = await tryGetRedirectResultOnce(`retry#${i + 1}`);
-            if (rrUser) {
-              setUser(rrUser);
-              setLoading(false);
-              clearRedirectPending();
-              return;
-            }
-
-            // 3) 等一下再試
-            await new Promise((r) => setTimeout(r, 1100));
-          }
-
-          // 真的沒拿到 -> 清掉 pending，讓流程繼續（才會去匿名）
-          console.warn("[Auth] pending timeout -> clear pending and continue");
-          clearRedirectPending();
-        }
-
-        // ✅ 有 user（即使匿名）也可以結束 loading
-        if (firebaseUser) {
-          setUser(firebaseUser);
-          setLoading(false);
-          return;
-        }
-
-        // ✅ 3) 沒登入 -> 自動匿名（只做一次）
-        if (!didTryAnonymousRef.current) {
-          didTryAnonymousRef.current = true;
-
-          await new Promise((r) => setTimeout(r, 300));
-
-          const u2 = auth.currentUser;
-          if (u2) {
-            setUser(u2);
-            setLoading(false);
-            return;
-          }
-
-          try {
-            await signInAnonymously(auth);
-            return;
-          } catch (e3: any) {
-            console.error("[Auth] signInAnonymously failed:", {
-              code: e3?.code ?? null,
-              message: e3?.message ?? String(e3),
-            });
-          }
-        }
-
-        setUser(null);
-        setLoading(false);
-      });
-
-      return unsub;
     };
 
-    let unsub: (() => void) | null = null;
-    (async () => {
-      unsub = await init();
-    })();
+    const resolveRedirectWaiter = (resolvedUser: User | null) => {
+      clearRedirectRecoveryTimeout();
+
+      if (redirectRecoveryResolverRef.current) {
+        const resolve = redirectRecoveryResolverRef.current;
+        redirectRecoveryResolverRef.current = null;
+        resolve(resolvedUser);
+      }
+    };
+
+    const finalizeRedirectRecovery = (status: "success" | "abandoned", resolvedUser: User | null) => {
+      resolveRedirectWaiter(resolvedUser);
+      clearRedirectPending();
+      redirectPendingRef.current = false;
+      redirectRecoveryStartedRef.current = false;
+      redirectRecoveryFinishedRef.current = true;
+      setRedirectRecovering(false);
+
+      console.log("[Auth] redirect recovery finished", {
+        status,
+        user: snapshotUser(resolvedUser),
+      });
+
+      return resolvedUser;
+    };
+
+    const ensureRedirectRecovery = (reason: string) => {
+      if (!(redirectPendingRef.current || hasRedirectPending())) {
+        redirectRecoveryFinishedRef.current = true;
+        return Promise.resolve(auth.currentUser ?? null);
+      }
+
+      if (redirectRecoveryPromiseRef.current) {
+        console.log("[Auth] redirect recovery join", { reason });
+        return redirectRecoveryPromiseRef.current;
+      }
+
+      redirectRecoveryStartedRef.current = true;
+      redirectRecoveryFinishedRef.current = false;
+      setRedirectRecovering(true);
+
+      console.log("[Auth] redirect recovery start", {
+        reason,
+        currentUser: snapshotUser(auth.currentUser),
+      });
+
+      redirectRecoveryPromiseRef.current = (async () => {
+        const redirectUser = await recoverRedirectResult("bootstrap");
+        if (redirectUser && !redirectUser.isAnonymous) {
+          return finalizeRedirectRecovery("success", redirectUser);
+        }
+
+        const currentUser = auth.currentUser;
+        console.log("[Auth] redirect bootstrap inspection", {
+          redirectUser: snapshotUser(redirectUser),
+          currentUser: snapshotUser(currentUser),
+          pending: redirectPendingRef.current || hasRedirectPending(),
+        });
+
+        if (currentUser && !currentUser.isAnonymous) {
+          return finalizeRedirectRecovery("success", currentUser);
+        }
+
+        console.log("[Auth] redirect recovery waiting for auth state");
+
+        const waitedUser = await new Promise<User | null>((resolve) => {
+          redirectRecoveryResolverRef.current = resolve;
+          redirectRecoveryTimeoutRef.current = window.setTimeout(() => {
+            redirectRecoveryResolverRef.current = null;
+            redirectRecoveryTimeoutRef.current = null;
+            console.warn("[Auth] redirect recovery timeout; giving up");
+            resolve(null);
+          }, REDIRECT_SETTLE_TIMEOUT_MS);
+        });
+
+        const finalUser =
+          waitedUser ??
+          (auth.currentUser && !auth.currentUser.isAnonymous ? auth.currentUser : null);
+
+        return finalizeRedirectRecovery(finalUser ? "success" : "abandoned", finalUser);
+      })().finally(() => {
+        redirectRecoveryPromiseRef.current = null;
+      });
+
+      return redirectRecoveryPromiseRef.current;
+    };
+
+    const init = async () => {
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+        console.log("[Auth] persistence set to browserLocalPersistence");
+      } catch (error: unknown) {
+        console.warn("[Auth] setPersistence failed", error);
+      }
+
+      if (redirectPendingRef.current) {
+        void ensureRedirectRecovery("init");
+      }
+
+      unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+        const runId = ++authChangeRunRef.current;
+
+        void (async () => {
+          console.log("[Auth] state changed", snapshotUser(firebaseUser));
+
+          let nextUser = firebaseUser;
+          const recoveryActive =
+            redirectPendingRef.current ||
+            hasRedirectPending() ||
+            (redirectRecoveryStartedRef.current && !redirectRecoveryFinishedRef.current);
+
+          if (recoveryActive) {
+            if (firebaseUser && !firebaseUser.isAnonymous) {
+              console.log("[Auth] redirect auth state resolved", snapshotUser(firebaseUser));
+              resolveRedirectWaiter(firebaseUser);
+            } else {
+              console.log("[Auth] redirect auth state still pending", snapshotUser(firebaseUser));
+            }
+
+            nextUser = await ensureRedirectRecovery("auth-state");
+          } else {
+            clearRedirectPending();
+            redirectPendingRef.current = false;
+            redirectRecoveryFinishedRef.current = true;
+            setRedirectRecovering(false);
+          }
+
+          if (!mountedRef.current || runId !== authChangeRunRef.current) {
+            return;
+          }
+
+          setUser(nextUser);
+          setAuthReady(true);
+        })();
+      });
+    };
+
+    void init();
 
     return () => {
-      alive = false;
-      if (unsub) unsub();
+      mountedRef.current = false;
+      clearRedirectRecoveryTimeout();
+      redirectRecoveryResolverRef.current = null;
+      if (unsubscribe) unsubscribe();
     };
   }, []);
 
+  useEffect(() => {
+    const redirectBlocked =
+      redirectRecovering ||
+      redirectPendingRef.current ||
+      hasRedirectPending() ||
+      (redirectRecoveryStartedRef.current && !redirectRecoveryFinishedRef.current);
+
+    if (redirectBlocked) {
+      if (!anonymousDeferredLogRef.current) {
+        console.log("[Auth] anonymous bootstrap deferred until redirect recovery finishes");
+        anonymousDeferredLogRef.current = true;
+      }
+      return;
+    }
+
+    if (anonymousDeferredLogRef.current) {
+      console.log("[Auth] anonymous bootstrap allowed");
+      anonymousDeferredLogRef.current = false;
+    }
+
+    if (!authReady || user) return;
+    if (anonymousBootstrapRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      if (auth.currentUser) {
+        return;
+      }
+
+      anonymousBootstrapRef.current = true;
+
+      void (async () => {
+        try {
+          console.log("[Auth] bootstrap anonymous session");
+          await signInAnonymously(auth);
+        } catch (error: unknown) {
+          const meta = readAuthError(error);
+
+          console.error("[Auth] signInAnonymously failed", {
+            code: meta.code ?? null,
+            message: meta.message ?? null,
+          });
+        } finally {
+          anonymousBootstrapRef.current = false;
+        }
+      })();
+    }, ANONYMOUS_BOOTSTRAP_DELAY_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [authReady, redirectRecovering, user]);
+
+  const signInWithGoogle = async () => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+
+    try {
+      await setPersistence(auth, browserLocalPersistence);
+    } catch (error: unknown) {
+      console.warn("[Auth] setPersistence before sign-in failed", error);
+    }
+
+    const isDevelopment = process.env.NODE_ENV !== "production";
+    const mobile = isProbablyMobileBrowser();
+    const currentUser = auth.currentUser;
+    const shouldUpgradeAnonymous = !!currentUser?.isAnonymous;
+
+    console.log("[Auth] starting Google sign-in", {
+      mobile,
+      env: isDevelopment ? "development" : "production",
+      strategy: shouldUpgradeAnonymous ? "upgrade-anonymous" : "sign-in",
+      currentUser: snapshotUser(currentUser),
+    });
+
+    if (isDevelopment || !mobile) {
+      console.log(isDevelopment ? "[Auth] using popup (dev)" : "[Auth] using popup (prod-desktop)", {
+        mobile,
+        currentUser: snapshotUser(currentUser),
+      });
+
+      const result = await signInWithPopup(auth, provider);
+      console.log("[Auth] popup sign-in success", snapshotUser(result.user));
+      clearRedirectPending();
+      redirectPendingRef.current = false;
+      redirectRecoveryStartedRef.current = false;
+      redirectRecoveryFinishedRef.current = true;
+      setRedirectRecovering(false);
+      return;
+    }
+
+    console.log("[Auth] using redirect (prod)", {
+      mobile,
+      strategy: shouldUpgradeAnonymous ? "upgrade-anonymous" : "sign-in",
+      currentUser: snapshotUser(currentUser),
+    });
+
+    if (mobile) {
+      setRedirectPending();
+      redirectPendingRef.current = true;
+      redirectRecoveryStartedRef.current = false;
+      redirectRecoveryFinishedRef.current = false;
+      setRedirectRecovering(true);
+
+      console.log("[Auth] mobile redirect branch selected", {
+        mode: shouldUpgradeAnonymous ? "linkWithRedirect" : "signInWithRedirect",
+        currentUser: snapshotUser(currentUser),
+      });
+
+      if (currentUser && currentUser.isAnonymous) {
+        console.log("[Auth] invoking linkWithRedirect for anonymous upgrade");
+        await linkWithRedirect(currentUser, provider);
+      } else {
+        console.log("[Auth] invoking signInWithRedirect");
+        await signInWithRedirect(auth, provider);
+      }
+
+      console.warn("[Auth] redirect call returned without leaving page");
+      return;
+    }
+  };
+
+  const logout = async () => {
+    if (redirectRecoveryTimeoutRef.current !== null) {
+      window.clearTimeout(redirectRecoveryTimeoutRef.current);
+      redirectRecoveryTimeoutRef.current = null;
+    }
+
+    if (redirectRecoveryResolverRef.current) {
+      const resolve = redirectRecoveryResolverRef.current;
+      redirectRecoveryResolverRef.current = null;
+      resolve(null);
+    }
+
+    clearRedirectPending();
+    redirectPendingRef.current = false;
+    redirectRecoveryStartedRef.current = false;
+    redirectRecoveryFinishedRef.current = true;
+    redirectRecoveryPromiseRef.current = null;
+    setRedirectRecovering(false);
+    await signOut(auth);
+  };
+
   const value = useMemo<AuthContextValue>(() => {
-    const isAnon = !!user?.isAnonymous;
+    const isAnonymous = !!user?.isAnonymous;
+
     return {
       user,
-      loading,
-      isAnonymous: isAnon,
-      isLoggedIn: !!user && !isAnon,
+      loading: !authReady || redirectRecovering,
+      authReady,
+      isAnonymous,
+      isLoggedIn: !!user && !isAnonymous,
+      signInWithGoogle,
+      logout,
     };
-  }, [user, loading]);
-
-  if (loading) {
-    return (
-      <div className="flex min-h-[50vh] items-center justify-center text-sm text-neutral-500">
-        muu space 正在為你準備小宇宙…
-      </div>
-    );
-  }
+  }, [authReady, redirectRecovering, user]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
-
-// ✅ 這行 export 給 Navbar 用（避免你再複製 key 名稱）
-export { setRedirectPending };
